@@ -8,8 +8,9 @@
         body {
 			margin: 0px;
             padding: 0px;
-			display: grid;
-			place-items: center;
+			display: flex;
+			justify-content: center;
+			align-items: center;
 		}
         canvas {
             width: 256px;
@@ -19,9 +20,13 @@
 </head>
 
 <body>
-    <canvas id="glcanvas" tabindex='1'></canvas>
-    <script src="https://not-fl3.github.io/miniquad-samples/mq_js_bundle.js"></script>
-    <script>load("target/wasm32-unknown-unknown/release/command-networking-rs.wasm");</script>
+    <canvas id="glcanvas1" tabindex='1'></canvas>
+	<canvas id="glcanvas2" tabindex='2'></canvas>
+    <script src="script.js"></script>
+    <script>
+		load("glcanvas1", "target/wasm32-unknown-unknown/release/command-networking-rs.wasm");
+		load("glcanvas2", "target/wasm32-unknown-unknown/release/command-networking-rs.wasm");
+	</script>
 </body>
 
 </html>

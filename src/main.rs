@@ -3,19 +3,54 @@ use macroquad::Window;
 
 const BACKGROUND_COLOR: Color = Color::new(0.168, 0.149, 0.152, 1.0);
 const SCREEN_SIZE: i32 = 256;
-const TICKRATE: u8 = 30;
+const TICKRATE: u8 = 20;
 const TICK_DELTA: f32 = 1.0 / TICKRATE as f32;
+
+//// Here we define the host FFI; for this project, it happens to
+//// almost entirely entail just the methods necessary to communicate
+//// with other clients over the host net.
+extern "C" {
+	fn send_start_game(
+		game: *mut Game
+	);
+
+	fn send_tick_data(
+		tick_index: usize,
+		data_ptr: *mut PlayerIntent,
+		len: usize,
+		capacity: usize
+	);
+}
+
+//// Below, we define the client FFI; these are the methods that the host
+//// will use to control the client.
+
+#[no_mangle]
+extern "C" fn receive_tick_data(
+	game: *mut Game,
+	player_index: usize,
+	tick_index: usize,
+	data_ptr: *mut PlayerIntent,
+	len: usize,
+	capacity: usize
+) {
+	let data = unsafe {
+		Vec::from_raw_parts(data_ptr, len, capacity)
+	};
+
+	todo!()
+}
 
 /// Represents all actions that a player may take.
 #[repr(u8)]
-enum PlayerCommand {
+enum PlayerIntent {
 	MoveLeft,
 	MoveRight,
 	Jump
 }
 
-impl From<PlayerCommand> for u8 {
-    fn from(command: PlayerCommand) -> u8 {
+impl From<PlayerIntent> for u8 {
+    fn from(command: PlayerIntent) -> u8 {
         command as u8
     }
 }
@@ -72,17 +107,17 @@ impl Player {
 		}
 	}
 
-	pub fn execute_command(&mut self, command: PlayerCommand) {
+	pub fn execute_command(&mut self, command: PlayerIntent) {
 		match command {
-			PlayerCommand::MoveLeft => {
+			PlayerIntent::MoveLeft => {
 				self.x -= Self::MOVE_SPEED * TICK_DELTA;
 				self.x = self.x.clamp(0.0, SCREEN_SIZE as f32 - Self::WIDTH);
 			},
-			PlayerCommand::MoveRight => {
+			PlayerIntent::MoveRight => {
 				self.x += Self::MOVE_SPEED * TICK_DELTA;
 				self.x = self.x.clamp(0.0, SCREEN_SIZE as f32 - Self::WIDTH);
 			}
-			PlayerCommand::Jump => {
+			PlayerIntent::Jump => {
 				if self.grounded {
 					self.vertical_velocity = 50.0;
 					self.grounded = false;
@@ -146,15 +181,15 @@ fn tick(game: &mut Game) {
 	}
 
 	if is_key_down(KeyCode::Up) {
-		game.local_player.execute_command(PlayerCommand::Jump);
+		game.local_player.execute_command(PlayerIntent::Jump);
 	}
 
 	if is_key_down(KeyCode::Left) {
-		game.local_player.execute_command(PlayerCommand::MoveLeft);
+		game.local_player.execute_command(PlayerIntent::MoveLeft);
 	}
 
 	if is_key_down(KeyCode::Right) {
-		game.local_player.execute_command(PlayerCommand::MoveRight);
+		game.local_player.execute_command(PlayerIntent::MoveRight);
 	}
 
 	game.local_player.update_physics();
