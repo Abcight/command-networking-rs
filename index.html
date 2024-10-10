@@ -1,0 +1,27 @@
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>TITLE</title>
+    <style>
+        html,
+        body {
+			margin: 0px;
+            padding: 0px;
+			display: grid;
+			place-items: center;
+		}
+        canvas {
+            width: 256px;
+            height: 256px;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="glcanvas" tabindex='1'></canvas>
+    <script src="https://not-fl3.github.io/miniquad-samples/mq_js_bundle.js"></script>
+    <script>load("target/wasm32-unknown-unknown/release/command-networking-rs.wasm");</script>
+</body>
+
+</html>
