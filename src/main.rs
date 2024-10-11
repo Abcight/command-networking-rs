@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use macroquad::prelude::*;
 use macroquad::Window;
@@ -18,42 +19,73 @@ extern "C" {
 
 	fn send_tick_data(
 		tick_index: usize,
-		data_ptr: *mut PlayerIntent,
-		len: usize,
-		capacity: usize
+		data_ptr: [PlayerIntent; 3],
 	);
 }
 
 //// Below, we define the client FFI; these are the methods that the host
-//// will use to control the client.
+//// will use to control the client. In a real-world scenario you would
+//// likely want some authorization + encryption mechanism to ensure data
+//// is not only correct, but has been issued by an authorized server.
+////
+//// For the purposes of this example, this security aspect has been
+//// skipped entirely, as auth/validation flows are *not* the subject
+//// of this demo.
 
 #[no_mangle]
-extern "C" fn receive_tick_data(
+extern "C" fn receive_tick(
 	game: *mut Game,
-	player_index: usize,
-	tick_index: usize,
-	data_ptr: *mut PlayerIntent,
-	len: usize,
-	capacity: usize
+	players: *mut u8,
+	players_len: usize,
+	player_intents: *mut [u8; 3],
+	player_intents_len: usize
 ) {
-	let data = unsafe {
-		Vec::from_raw_parts(data_ptr, len, capacity)
+	let game = unsafe { &mut *game };
+
+	let player_ids = unsafe {
+		std::slice::from_raw_parts(players, players_len)
 	};
 
-	todo!()
+	let player_intents = unsafe {
+		std::slice::from_raw_parts(player_intents, player_intents_len)
+	};
+
+	let mut intent_map = HashMap::new();
+
+	for player_id in player_ids {
+		let mut intents = vec![];
+		let index = *player_id as usize;
+		for intent in &player_intents[index] {
+			intents.push(PlayerIntent::from(*intent));
+		}
+
+		intent_map.insert((*player_id).into(), intents);
+	}
+
+	let tick = Tick {
+		intents: intent_map
+	};
+
+	game.simulate_tick(tick);
 }
 
 /// Represents all actions that a player may take.
 #[repr(u8)]
 enum PlayerIntent {
-	MoveLeft,
-	MoveRight,
-	Jump
+	MoveLeft = 1,
+	MoveRight = 2,
+	Jump = 3
+}
+
+impl From<u8> for PlayerIntent {
+	fn from(value: u8) -> Self {
+		value.into()
+	}
 }
 
 impl From<PlayerIntent> for u8 {
-    fn from(command: PlayerIntent) -> u8 {
-        command as u8
+    fn from(intent: PlayerIntent) -> u8 {
+        intent as u8
     }
 }
 
