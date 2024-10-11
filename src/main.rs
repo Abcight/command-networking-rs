@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use macroquad::prelude::*;
 use macroquad::Window;
 
@@ -78,6 +80,13 @@ impl Player {
 		}
 	}
 
+	pub fn enemy() -> Self {
+		Self {
+			color: RED,
+			..Default::default()
+		}
+	}
+
 	pub fn draw(&self, smoothing: f32) {
 		let smooth_x = (1.0 - smoothing) * self.last_tick_x + self.x * smoothing;
 		let smooth_y = (1.0 - smoothing) * self.last_tick_y + self.y * smoothing;
@@ -107,8 +116,8 @@ impl Player {
 		}
 	}
 
-	pub fn execute_command(&mut self, command: PlayerIntent) {
-		match command {
+	pub fn execute_intent(&mut self, intent: &PlayerIntent) {
+		match intent {
 			PlayerIntent::MoveLeft => {
 				self.x -= Self::MOVE_SPEED * TICK_DELTA;
 				self.x = self.x.clamp(0.0, SCREEN_SIZE as f32 - Self::WIDTH);
@@ -127,9 +136,55 @@ impl Player {
 	}
 }
 
+pub type ClientId = usize;
+
+struct Tick {
+	intents: HashMap<ClientId, Vec<PlayerIntent>>
+}
+
 struct Game {
-	local_player: Player,
-	net_players: Vec<Player>,
+	client_id: ClientId,
+	players: HashMap<ClientId, Player>,
+	ticks: Vec<Tick>
+}
+
+impl Game {
+	fn poll_intents(&self) -> Vec<PlayerIntent> {
+		let mut intents = vec![];
+
+		if is_key_down(KeyCode::Up) {
+			intents.push(PlayerIntent::Jump);
+		}
+
+		if is_key_down(KeyCode::Left) {
+			intents.push(PlayerIntent::MoveLeft);
+		}
+
+		if is_key_down(KeyCode::Right) {
+			intents.push(PlayerIntent::MoveRight);
+		}
+
+		intents
+	}
+
+	fn simulate_tick(&mut self, tick: Tick) {
+		for (_, player) in &mut self.players {
+			player.snapshot_position();
+		}
+
+		for (id, intents) in &tick.intents {
+			let player = self.players.entry(*id).or_insert(Player::enemy());
+			for intent in intents {
+				player.execute_intent(intent);
+			}
+		}
+
+		for (_, player) in &mut self.players {
+			player.update_physics();
+		}
+
+		self.ticks.push(tick);
+	}
 }
 
 fn main() {
@@ -145,9 +200,12 @@ async fn amain() {
 	let mut tick_time = 0.0;
 
 	let mut game = Game {
-		local_player: Player::new(),
-		net_players: vec![]
+		client_id: 0,
+		players: HashMap::new(),
+		ticks: Vec::new(),
 	};
+
+	game.players.insert(0, Player::new());
 
 	let rect = Rect::new(
 		0.0,
@@ -163,7 +221,13 @@ async fn amain() {
 		tick_time += get_frame_time();
 
 		while tick_time >= TICK_DELTA {
-			tick(&mut game);
+			let local_intents = game.poll_intents();
+			let mut tick = Tick {
+				intents: HashMap::new()
+			};
+			tick.intents.insert(game.client_id, local_intents);
+
+			game.simulate_tick(tick);
 			tick_time -= TICK_DELTA;
 		}
 
@@ -174,35 +238,10 @@ async fn amain() {
 	}
 }
 
-fn tick(game: &mut Game) {
-	game.local_player.snapshot_position();
-	for net_player in &mut game.net_players {
-		net_player.snapshot_position();
-	}
-
-	if is_key_down(KeyCode::Up) {
-		game.local_player.execute_command(PlayerIntent::Jump);
-	}
-
-	if is_key_down(KeyCode::Left) {
-		game.local_player.execute_command(PlayerIntent::MoveLeft);
-	}
-
-	if is_key_down(KeyCode::Right) {
-		game.local_player.execute_command(PlayerIntent::MoveRight);
-	}
-
-	game.local_player.update_physics();
-	for net_player in &mut game.net_players {
-		net_player.update_physics();
-	}
-}
-
 fn present(game: &mut Game, tick_time: f32) {
 	let smoothing = tick_time / TICK_DELTA;
 
-	game.local_player.draw(smoothing);
-	for net_player in &game.net_players {
-		net_player.draw(smoothing);
+	for (_, player) in &game.players {
+		player.draw(smoothing);
 	}
 }
