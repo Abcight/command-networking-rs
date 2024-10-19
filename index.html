@@ -17,16 +17,31 @@
             height: 256px;
         }
     </style>
+	<script src="script.js"></script>
+	<script src="ffi.js"></script>
 </head>
 
 <body>
-    <canvas id="glcanvas1" tabindex='1'></canvas>
-	<canvas id="glcanvas2" tabindex='2'></canvas>
-    <script src="script.js"></script>
-    <script>
-		load("glcanvas1", "target/wasm32-unknown-unknown/release/command-networking-rs.wasm");
-		load("glcanvas2", "target/wasm32-unknown-unknown/release/command-networking-rs.wasm");
-	</script>
+	<div id="game1">
+		<canvas id="glcanvas1" tabindex='1'></canvas>
+		<canvas id="glcanvas2" tabindex='2'></canvas>
+		<script>
+			let client_1 = load("glcanvas1", "target/wasm32-unknown-unknown/release/command-networking-rs.wasm");
+			let client_2 = load("glcanvas2", "target/wasm32-unknown-unknown/release/command-networking-rs.wasm");
+
+			client_1.then(guest => {
+				let exports = guest.wasm_exports;
+				let memory = guest.wasm_memory;
+				exports.start_game(1);
+			});
+
+			client_2.then(guest => {
+				let exports = guest.wasm_exports;
+				let memory = guest.wasm_memory;
+				exports.start_game(2);
+			});
+		</script>
+	</div>
 </body>
 
 </html>

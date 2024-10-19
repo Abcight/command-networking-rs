@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use macroquad::prelude::*;
 use macroquad::Window;
@@ -13,13 +12,13 @@ const TICK_DELTA: f32 = 1.0 / TICKRATE as f32;
 //// almost entirely entail just the methods necessary to communicate
 //// with other clients over the host net.
 extern "C" {
-	fn send_start_game(
+	fn send_game(
 		game: *mut Game
-	);
+	) -> u8;
 
 	fn send_tick_data(
 		tick_index: usize,
-		data_ptr: [PlayerIntent; 3],
+		data_ptr: [u8; 3],
 	);
 }
 
@@ -31,6 +30,16 @@ extern "C" {
 //// For the purposes of this example, this security aspect has been
 //// skipped entirely, as auth/validation flows are *not* the subject
 //// of this demo.
+
+#[no_mangle]
+extern "C" fn start_game(client_id: usize) {
+	Window::from_config(Conf {
+		window_width: SCREEN_SIZE,
+		window_height: SCREEN_SIZE,
+		window_resizable: false,
+		..Default::default()
+	}, amain(client_id));
+}
 
 #[no_mangle]
 extern "C" fn receive_tick(
@@ -219,25 +228,23 @@ impl Game {
 	}
 }
 
-fn main() {
-	Window::from_config(Conf {
-		window_width: SCREEN_SIZE,
-		window_height: SCREEN_SIZE,
-		window_resizable: false,
-		..Default::default()
-	}, amain());
-}
+fn main() { }
 
-async fn amain() {
+async fn amain(client_id: usize) {
 	let mut tick_time = 0.0;
 
 	let mut game = Game {
-		client_id: 0,
+		client_id: client_id,
 		players: HashMap::new(),
 		ticks: Vec::new(),
 	};
 
-	game.players.insert(0, Player::new());
+	game.players.insert(
+		client_id,
+		Player::new()
+	);
+
+	unsafe { send_game(&mut game) };
 
 	let rect = Rect::new(
 		0.0,

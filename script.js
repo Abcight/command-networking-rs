@@ -1,15 +1,21 @@
 // A slightly modified version of script found at
 // https://raw.githubusercontent.com/not-fl3/miniquad/refs/heads/master/js/gl.js
+
+var plugins = [];
+
+function miniquad_add_plugin(plugin) {
+	plugins.push(plugin);
+}
+
 function load(canvas_id, wasm_path) {
 	const version = 2;
 
 	var gl;
-
 	var clipboard = null;
 
 	const canvas = document.querySelector(`#${canvas_id}`);
-	var plugins = [];
 	var wasm_memory;
+	var wasm_exports;
 	var animation_frame_timeout;
 
 	var high_dpi = false;
@@ -410,7 +416,6 @@ function load(canvas_id, wasm_path) {
 	}
 
 	var Module;
-	var wasm_exports;
 
 	function resize(canvas, on_resize) {
 		var dpr = dpi_scale();
@@ -1438,7 +1443,6 @@ function load(canvas_id, wasm_path) {
 		}
 	};
 
-
 	function register_plugins(plugins) {
 		if (plugins == undefined)
 			return;
@@ -1479,11 +1483,6 @@ function load(canvas_id, wasm_path) {
 		}
 	}
 
-
-	function miniquad_add_plugin(plugin) {
-		plugins.push(plugin);
-	}
-
 	// read module imports and create fake functions in import object
 	// this is will allow to successfeully link wasm even with wrong version of gl.js
 	// needed to workaround firefox bug with lost error on wasm linking errors
@@ -1501,33 +1500,36 @@ function load(canvas_id, wasm_path) {
 	}
 
 	function load(wasm_path) {
+		let load_promise = null;
 		var req = fetch(wasm_path);
 
 		register_plugins(plugins);
 
 		if (typeof WebAssembly.compileStreaming === 'function') {
-			WebAssembly.compileStreaming(req)
+			load_promise = new Promise((res, err) => WebAssembly.compileStreaming(req)
 				.then(obj => {
 					add_missing_functions_stabs(obj);
 					return WebAssembly.instantiate(obj, importObject);
 				})
-				.then(
-					obj => {
-						wasm_memory = obj.exports.memory;
-						wasm_exports = obj.exports;
+				.then(obj => {
+					wasm_memory = obj.exports.memory;
+					wasm_exports = obj.exports;
 
-						var crate_version = wasm_exports.crate_version();
-						if (version != crate_version) {
-							console.error(
-								"Version mismatch: gl.js version is: " + version +
-								", miniquad crate version is: " + crate_version);
-						}
-						init_plugins(plugins);
-						obj.exports.main();
-					})
+					var crate_version = wasm_exports.crate_version();
+					if (version != crate_version) {
+						console.error(
+							"Version mismatch: gl.js version is: " + version +
+							", miniquad crate version is: " + crate_version);
+					}
+					init_plugins(plugins);
+					obj.exports.main();
+
+					res({wasm_memory, wasm_exports});
+				})
 				.catch(err => {
 					console.error(err);
 				})
+			);
 		} else {
 			req
 				.then(function (x) { return x.arrayBuffer(); })
@@ -1554,7 +1556,9 @@ function load(canvas_id, wasm_path) {
 					console.error(err);
 				});
 		}
+
+		return load_promise;
 	}
 
-	load(wasm_path);
+	return load(wasm_path);
 }
