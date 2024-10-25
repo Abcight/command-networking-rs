@@ -1515,6 +1515,9 @@ function load(canvas_id, wasm_path) {
 					wasm_memory = obj.exports.memory;
 					wasm_exports = obj.exports;
 
+					importObject.wasm_memory = obj.exports.memory;
+					importObject.wasm_exports = obj.exports;
+
 					var crate_version = wasm_exports.crate_version();
 					if (version != crate_version) {
 						console.error(

@@ -26,19 +26,22 @@
 		<canvas id="glcanvas1" tabindex='1'></canvas>
 		<canvas id="glcanvas2" tabindex='2'></canvas>
 		<script>
+			let players = [];
 			let client_1 = load("glcanvas1", "target/wasm32-unknown-unknown/release/command-networking-rs.wasm");
 			let client_2 = load("glcanvas2", "target/wasm32-unknown-unknown/release/command-networking-rs.wasm");
 
 			client_1.then(guest => {
-				let exports = guest.wasm_exports;
-				let memory = guest.wasm_memory;
-				exports.start_game(1);
+				players.push(guest);
+				if(players.length == 2) {
+					start_round(players);
+				}
 			});
 
 			client_2.then(guest => {
-				let exports = guest.wasm_exports;
-				let memory = guest.wasm_memory;
-				exports.start_game(2);
+				players.push(guest);
+				if(players.length == 2) {
+					start_round(players);
+				}
 			});
 		</script>
 	</div>

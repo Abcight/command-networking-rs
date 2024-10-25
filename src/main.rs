@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use macroquad::prelude::*;
 use macroquad::Window;
@@ -8,17 +9,17 @@ const SCREEN_SIZE: i32 = 256;
 const TICKRATE: u8 = 20;
 const TICK_DELTA: f32 = 1.0 / TICKRATE as f32;
 
+static SERVER_GAME: Mutex<Option<Game>> = Mutex::new(None);
+static LOCAL_GAME: Mutex<Option<Game>> = Mutex::new(None);
+
 //// Here we define the host FFI; for this project, it happens to
 //// almost entirely entail just the methods necessary to communicate
 //// with other clients over the host net.
 extern "C" {
-	fn send_game(
-		game: *mut Game
-	) -> u8;
-
 	fn send_tick_data(
 		tick_index: usize,
-		data_ptr: [u8; 3],
+		data_ptr: *mut u8,
+		data_size: usize
 	);
 }
 
@@ -43,13 +44,16 @@ extern "C" fn start_game(client_id: usize) {
 
 #[no_mangle]
 extern "C" fn receive_tick(
-	game: *mut Game,
 	players: *mut u8,
 	players_len: usize,
-	player_intents: *mut [u8; 3],
+	player_intents: *mut u8,
 	player_intents_len: usize
 ) {
-	let game = unsafe { &mut *game };
+	let game = SERVER_GAME
+		.lock()
+		.unwrap()
+		.as_mut()
+		.unwrap();
 
 	let player_ids = unsafe {
 		std::slice::from_raw_parts(players, players_len)
@@ -61,25 +65,29 @@ extern "C" fn receive_tick(
 
 	let mut intent_map = HashMap::new();
 
+	let mut index = 0;
 	for player_id in player_ids {
 		let mut intents = vec![];
-		let index = *player_id as usize;
-		for intent in &player_intents[index] {
+
+		let intent_bytes = &player_intents[(3 * index)..(3 * index + 3)];
+		for intent in intent_bytes {
 			intents.push(PlayerIntent::from(*intent));
 		}
 
 		intent_map.insert((*player_id).into(), intents);
+		index += 1;
 	}
 
 	let tick = Tick {
 		intents: intent_map
 	};
 
-	game.simulate_tick(tick);
+	// game.as_mut().unwrap().simulate_tick(tick);
 }
 
 /// Represents all actions that a player may take.
 #[repr(u8)]
+#[derive(Clone, Copy)]
 enum PlayerIntent {
 	MoveLeft = 1,
 	MoveRight = 2,
@@ -232,6 +240,7 @@ fn main() { }
 
 async fn amain(client_id: usize) {
 	let mut tick_time = 0.0;
+	let mut tick_index = 0;
 
 	let mut game = Game {
 		client_id: client_id,
@@ -243,8 +252,6 @@ async fn amain(client_id: usize) {
 		client_id,
 		Player::new()
 	);
-
-	unsafe { send_game(&mut game) };
 
 	let rect = Rect::new(
 		0.0,
@@ -261,6 +268,24 @@ async fn amain(client_id: usize) {
 
 		while tick_time >= TICK_DELTA {
 			let local_intents = game.poll_intents();
+
+			unsafe {
+				let mut tick_data_bytes: Vec<u8> = local_intents
+					.iter()
+					.map(|x| x.to_owned().into())
+					.collect();
+
+				tick_data_bytes.shrink_to_fit();
+
+				send_tick_data(
+					tick_index,
+					tick_data_bytes.as_mut_ptr(),
+					tick_data_bytes.len()
+				);
+
+				std::mem::forget(tick_data_bytes);
+			}
+
 			let mut tick = Tick {
 				intents: HashMap::new()
 			};
@@ -268,6 +293,7 @@ async fn amain(client_id: usize) {
 
 			game.simulate_tick(tick);
 			tick_time -= TICK_DELTA;
+			tick_index += 1;
 		}
 
 		clear_background(BACKGROUND_COLOR);
