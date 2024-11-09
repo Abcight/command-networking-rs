@@ -9,8 +9,9 @@ const SCREEN_SIZE: i32 = 256;
 const TICKRATE: u8 = 20;
 const TICK_DELTA: f32 = 1.0 / TICKRATE as f32;
 
-static SERVER_GAME: Mutex<Option<Game>> = Mutex::new(None);
-static LOCAL_GAME: Mutex<Option<Game>> = Mutex::new(None);
+/// This queue will hold all of the intents received from the server
+/// that are intended to be processed on the next local tick.
+static TICK_QUEUE: Mutex<Vec<Tick>> = Mutex::new(Vec::new());
 
 //// Here we define the host FFI; for this project, it happens to
 //// almost entirely entail just the methods necessary to communicate
@@ -49,10 +50,8 @@ extern "C" fn receive_tick(
 	player_intents: *mut u8,
 	player_intents_len: usize
 ) {
-	let game = SERVER_GAME
+	let mut queue = TICK_QUEUE
 		.lock()
-		.unwrap()
-		.as_mut()
 		.unwrap();
 
 	let player_ids = unsafe {
@@ -82,11 +81,11 @@ extern "C" fn receive_tick(
 		intents: intent_map
 	};
 
-	// game.as_mut().unwrap().simulate_tick(tick);
+	queue.push(tick);
 }
 
 /// Represents all actions that a player may take.
-#[repr(u8)]
+#[repr(C)]
 #[derive(Clone, Copy)]
 enum PlayerIntent {
 	MoveLeft = 1,
@@ -101,9 +100,9 @@ impl From<u8> for PlayerIntent {
 }
 
 impl From<PlayerIntent> for u8 {
-    fn from(intent: PlayerIntent) -> u8 {
-        intent as u8
-    }
+	fn from(intent: PlayerIntent) -> u8 {
+		intent as u8
+	}
 }
 
 #[derive(Default)]
@@ -216,7 +215,7 @@ impl Game {
 		intents
 	}
 
-	fn simulate_tick(&mut self, tick: Tick) {
+	fn simulate(&mut self, tick: Tick) {
 		for (_, player) in &mut self.players {
 			player.snapshot_position();
 		}
@@ -291,7 +290,18 @@ async fn amain(client_id: usize) {
 			};
 			tick.intents.insert(game.client_id, local_intents);
 
-			game.simulate_tick(tick);
+			let mut net_intents = TICK_QUEUE.lock().unwrap();
+			for net_tick in net_intents.iter_mut() {
+				for (player_id, intents) in &mut net_tick.intents {
+					let net_to_local_intent_binding = tick
+						.intents
+						.entry(*player_id)
+						.or_insert(Vec::new());
+					net_to_local_intent_binding.append(intents);
+				}
+			}
+
+			game.simulate(tick);
 			tick_time -= TICK_DELTA;
 			tick_index += 1;
 		}

@@ -1,22 +1,19 @@
-let client_id_to_gameptr_map = [];
-
 let tick_data = [];
 let current_tick_index = 0;
+let next_guest_id = 0;
 
 let register_ffi = function(guest) {
-	guest.env.send_game = function(
-		game_ptr,	// *mut Game
-	) {
-		guest.id = client_id_to_gameptr_map.length;
-		client_id_to_gameptr_map.push(game_ptr);
-		return guest.id;
-	}
-
 	guest.env.send_tick_data = function(
 		tick_index,	// u8
 		data_ptr,	// *mut u8
 		data_len,	// usize
 	) {
+		// give the guest a unique id if they don't have any yet
+		if(guest.id == undefined) {
+			guest.id = next_guest_id;
+			next_guest_id += 1;
+		}
+
 		// the player got ahead of themselves, and starts
 		// sending ticks from the future...
 		if(tick_index > tick_data.length) {
@@ -26,11 +23,6 @@ let register_ffi = function(guest) {
 		// construct a tick entry if it's not there yet
 		if(tick_index == tick_data.length) {
 			tick_data[tick_index] = {};
-		}
-
-		// we don't want players changing their historical record...
-		if(guest.id in tick_data[tick_index]) {
-			return;
 		}
 
 		// grab the intents passed by the guest ...
@@ -50,7 +42,8 @@ let start_round = function(guests) {
 	current_tick_index = 0;
 
 	for(let i = 0; i < guests.length; i++) {
-		guests[i].id = client_id_to_gameptr_map.length;
+		guests[i].id = i;
+		guests[i].wasm_exports.id = i;
 		guests[i].wasm_exports.start_game(i + 1);
 	}
 
@@ -58,14 +51,13 @@ let start_round = function(guests) {
 		if(current_tick_index in tick_data) {
 			let tick = tick_data[current_tick_index];
 
-			if(Object.keys(tick).length < guests.length) {
+			let all_player_data_arrived = Object.keys(tick).length >= guests.length;
+			if(!all_player_data_arrived) {
 				return;
 			}
 
 			for(let i = 0; i < guests.length; i++) {
 				let guest = guests[i].wasm_exports;
-
-				let game_ptr = client_id_to_gameptr_map[guest.id];
 
 				let wasm_players_len = guests.length - 1;
 				let wasm_players_ptr = guest.allocate_vec_u8(wasm_players_len);
@@ -98,15 +90,12 @@ let start_round = function(guests) {
 					index++;
 				}
 
-				console.log(wasm_intents);
-
-				/*guests[i].wasm_exports.receive_tick(
-					game_ptr,
+				guests[i].wasm_exports.receive_tick(
 					wasm_players_ptr,
 					wasm_players_len,
 					wasm_intents_ptr,
 					wasm_intents_len
-				);*/
+				);
 			}
 			current_tick_index++;
 		}
