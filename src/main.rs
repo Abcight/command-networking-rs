@@ -69,8 +69,10 @@ extern "C" fn receive_tick(
 		let mut intents = vec![];
 
 		let intent_bytes = &player_intents[(3 * index)..(3 * index + 3)];
-		for intent in intent_bytes {
-			intents.push(PlayerIntent::from(*intent));
+		for &intent in intent_bytes {
+			if intent != 0 {
+				intents.push(PlayerIntent::from(intent));
+			}
 		}
 
 		intent_map.insert((*player_id).into(), intents);
@@ -85,7 +87,6 @@ extern "C" fn receive_tick(
 }
 
 /// Represents all actions that a player may take.
-#[repr(C)]
 #[derive(Clone, Copy)]
 enum PlayerIntent {
 	MoveLeft = 1,
@@ -95,13 +96,24 @@ enum PlayerIntent {
 
 impl From<u8> for PlayerIntent {
 	fn from(value: u8) -> Self {
-		value.into()
+		use PlayerIntent::*;
+
+		match value {
+			1 => MoveLeft,
+			2 => MoveRight,
+			3 => Jump,
+			_ => panic!()
+		}
 	}
 }
 
 impl From<PlayerIntent> for u8 {
 	fn from(intent: PlayerIntent) -> u8 {
-		intent as u8
+		match intent {
+			PlayerIntent::MoveLeft => 1,
+			PlayerIntent::MoveRight => 2,
+			PlayerIntent::Jump => 3
+		}
 	}
 }
 
@@ -121,7 +133,7 @@ impl Player {
 	const WIDTH: f32 = 30.0;
 	const HEIGHT: f32 = 30.0;
 
-	pub fn new() -> Self {
+	pub fn local() -> Self {
 		Self {
 			color: BLUE,
 			..Default::default()
@@ -242,14 +254,14 @@ async fn amain(client_id: usize) {
 	let mut tick_index = 0;
 
 	let mut game = Game {
-		client_id: client_id,
+		client_id,
 		players: HashMap::new(),
 		ticks: Vec::new(),
 	};
 
 	game.players.insert(
 		client_id,
-		Player::new()
+		Player::local()
 	);
 
 	let rect = Rect::new(
@@ -292,22 +304,28 @@ async fn amain(client_id: usize) {
 
 			let mut net_intents = TICK_QUEUE.lock().unwrap();
 			for net_tick in net_intents.iter_mut() {
-				for (player_id, intents) in &mut net_tick.intents {
+				for (&player_id, intents) in &mut net_tick.intents {
+					if player_id == game.client_id {
+						continue;
+					}
+
 					let net_to_local_intent_binding = tick
 						.intents
-						.entry(*player_id)
+						.entry(player_id)
 						.or_insert(Vec::new());
 					net_to_local_intent_binding.append(intents);
 				}
 			}
 
 			game.simulate(tick);
+
 			tick_time -= TICK_DELTA;
 			tick_index += 1;
 		}
 
 		clear_background(BACKGROUND_COLOR);
 		present(&mut game, tick_time);
+		draw_text(&format!("{}", game.client_id), 15.0, 15.0, 16.0, RED);
 
 		next_frame().await;
 	}
