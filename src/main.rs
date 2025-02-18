@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::VecDeque;
+use sha2::{Sha256, Digest};
 
 use macroquad::prelude::*;
 use macroquad::Window;
@@ -9,16 +10,11 @@ const SCREEN_SIZE: i32 = 256;
 const TICKRATE: u8 = 20;
 const TICK_DELTA: f32 = 1.0 / TICKRATE as f32;
 
-/// This queue will hold all of the intents received from the server
-/// that are intended to be processed on the next local tick.
-static TICK_QUEUE: Mutex<Vec<Tick>> = Mutex::new(Vec::new());
-
 //// Here we define the host FFI; for this project, it happens to
 //// almost entirely entail just the methods necessary to communicate
-//// with other clients over the host net.
+//// with the server over the net.
 extern "C" {
-	fn send_tick_data(
-		tick_index: usize,
+	fn send_command_frame(
 		data_ptr: *mut u8,
 		data_size: usize
 	);
@@ -34,7 +30,7 @@ extern "C" {
 //// of this demo.
 
 #[no_mangle]
-extern "C" fn start_game(client_id: usize) {
+extern "C" fn start_game(client_id: u8) {
 	Window::from_config(Conf {
 		window_width: SCREEN_SIZE,
 		window_height: SCREEN_SIZE,
@@ -50,69 +46,46 @@ extern "C" fn receive_tick(
 	player_intents: *mut u8,
 	player_intents_len: usize
 ) {
-	let mut queue = TICK_QUEUE
-		.lock()
-		.unwrap();
 
-	let player_ids = unsafe {
-		std::slice::from_raw_parts(players, players_len)
-	};
-
-	let player_intents = unsafe {
-		std::slice::from_raw_parts(player_intents, player_intents_len)
-	};
-
-	let mut intent_map = HashMap::new();
-
-	let mut index = 0;
-	for player_id in player_ids {
-		let mut intents = vec![];
-
-		let intent_bytes = &player_intents[(3 * index)..(3 * index + 3)];
-		for &intent in intent_bytes {
-			if intent != 0 {
-				intents.push(PlayerIntent::from(intent));
-			}
-		}
-
-		intent_map.insert((*player_id).into(), intents);
-		index += 1;
-	}
-
-	let tick = Tick {
-		intents: intent_map
-	};
-
-	queue.push(tick);
 }
+
+/// This trait defines the methods that must be implemented by all types
+/// which will be sent over the wire.
+pub trait NetType: Sized {
+	fn to_bytes(&self, buffer: &mut Buffer);
+	fn from_bytes(buffer: &mut Buffer) -> Result<Self, ()>;
+}
+
+pub type Buffer = VecDeque<u8>;
 
 /// Represents all actions that a player may take.
 #[derive(Clone, Copy)]
+#[repr(u8)]
 enum PlayerIntent {
+	/// The player wants to move to the left.
 	MoveLeft = 1,
+	/// The player wants to move to the right.
 	MoveRight = 2,
-	Jump = 3
+	/// The player wants to jump.
+	Jump = 3,
 }
 
-impl From<u8> for PlayerIntent {
-	fn from(value: u8) -> Self {
-		use PlayerIntent::*;
-
-		match value {
-			1 => MoveLeft,
-			2 => MoveRight,
-			3 => Jump,
-			_ => panic!()
-		}
-	}
-}
-
-impl From<PlayerIntent> for u8 {
-	fn from(intent: PlayerIntent) -> u8 {
-		match intent {
+impl NetType for PlayerIntent {
+	fn to_bytes(&self, buffer: &mut Buffer) {
+		buffer.push_back(match self {
 			PlayerIntent::MoveLeft => 1,
 			PlayerIntent::MoveRight => 2,
-			PlayerIntent::Jump => 3
+			PlayerIntent::Jump => 3,
+		});
+	}
+
+	fn from_bytes(buffer: &mut Buffer) -> Result<Self, ()> {
+		let Some(tag) = buffer.pop_front() else { return Err(()) };
+		match tag {
+			1 => Ok(PlayerIntent::MoveLeft),
+			2 => Ok(PlayerIntent::MoveRight),
+			3 => Ok(PlayerIntent::Jump),
+			_ => Err(())
 		}
 	}
 }
@@ -167,10 +140,10 @@ impl Player {
 
 	pub fn update_physics(&mut self) {
 		self.y += self.vertical_velocity * TICK_DELTA * 10.0;
-		self.vertical_velocity -= 9.81 * TICK_DELTA * 10.0;
+		self.vertical_velocity += 9.81 * TICK_DELTA * 10.0;
 
-		if self.y <= 0.0 {
-			self.y = 0.0;
+		if self.y >= SCREEN_SIZE as f32 - 30.0 {
+			self.y = SCREEN_SIZE as f32 - 30.0;
 			self.vertical_velocity = 0.0;
 			self.grounded = true;
 		}
@@ -185,10 +158,10 @@ impl Player {
 			PlayerIntent::MoveRight => {
 				self.x += Self::MOVE_SPEED * TICK_DELTA;
 				self.x = self.x.clamp(0.0, SCREEN_SIZE as f32 - Self::WIDTH);
-			}
+			},
 			PlayerIntent::Jump => {
 				if self.grounded {
-					self.vertical_velocity = 50.0;
+					self.vertical_velocity = -50.0;
 					self.grounded = false;
 				}
 			},
@@ -196,16 +169,107 @@ impl Player {
 	}
 }
 
-pub type ClientId = usize;
+pub type ClientId = u8;
+
+#[derive(Clone)]
+struct CommandFrame {
+	owner: ClientId,
+	intents: Vec<PlayerIntent>
+}
+
+impl CommandFrame {
+	pub fn update_hasher(&self, hasher: &mut impl Digest) {
+		hasher.update(&[self.owner, self.intents.len() as u8]);
+		for intent in &self.intents {
+			hasher.update(&[*intent as u8]);
+		}
+	}
+}
+
+impl NetType for CommandFrame {
+	fn to_bytes(&self, buffer: &mut Buffer) {
+		buffer.push_back(self.owner);
+		buffer.push_back(self.intents.len() as u8);
+		for intent in &self.intents {
+			intent.to_bytes(buffer);
+		}
+	}
+
+	fn from_bytes(buffer: &mut Buffer) -> Result<Self, ()> {
+		let Some(owner) = buffer.pop_front() else { return Err(()) };
+		let Some(len) = buffer.pop_front() else { return Err(()) };
+		let mut intents = Vec::new();
+
+		for _ in 0..len {
+			let intent = PlayerIntent::from_bytes(buffer)?;
+			intents.push(intent);
+		}
+
+		Ok(CommandFrame {
+			owner,
+			intents
+		})
+	}
+}
 
 struct Tick {
-	intents: HashMap<ClientId, Vec<PlayerIntent>>
+	index: u8,
+	command_frames: Vec<CommandFrame>,
+	hash: [u8; 32]
+}
+
+impl Tick {
+	fn new(index: u8, command_frames: Vec<CommandFrame>) -> Self {
+		let mut tick = Tick {
+			index,
+			command_frames,
+			hash: [0; 32]
+		};
+		tick.recalculate_hash();
+		tick
+	}
+
+	fn recalculate_hash(&mut self) {
+		let mut hasher = Sha256::new();
+		hasher.update(&[self.index, self.command_frames.len() as u8]);
+		for command_frame in &self.command_frames {
+			command_frame.update_hasher(&mut hasher);
+		}
+		self.hash = hasher.finalize().into();
+	}
+}
+
+impl NetType for Tick {
+	fn to_bytes(&self, buffer: &mut Buffer) {
+		buffer.push_back(self.index);
+		buffer.push_back(self.command_frames.len() as u8);
+		for command_frame in &self.command_frames {
+			command_frame.to_bytes(buffer);
+		}
+	}
+
+	fn from_bytes(buffer: &mut Buffer) -> Result<Self, ()> {
+		let Some(index) = buffer.pop_front() else { return Err(()) };
+		let Some(len) = buffer.pop_front() else { return Err(()) };
+
+		let mut command_frames = Vec::new();
+		for _ in 0..len {
+			let command_frame = CommandFrame::from_bytes(buffer)?;
+			command_frames.push(command_frame);
+		}
+
+		Ok(Tick::new(
+			index,
+			command_frames
+		))
+	}
 }
 
 struct Game {
 	client_id: ClientId,
 	players: HashMap<ClientId, Player>,
-	ticks: Vec<Tick>
+	ticks: Vec<Tick>,
+	accepted_head: usize,
 }
 
 impl Game {
@@ -227,14 +291,14 @@ impl Game {
 		intents
 	}
 
-	fn simulate(&mut self, tick: Tick) {
+	fn simulate(&mut self, tick: &Tick) {
 		for (_, player) in &mut self.players {
 			player.snapshot_position();
 		}
 
-		for (id, intents) in &tick.intents {
-			let player = self.players.entry(*id).or_insert(Player::enemy());
-			for intent in intents {
+		for frame in &tick.command_frames {
+			let player = self.players.entry(frame.owner).or_insert(Player::enemy());
+			for intent in &frame.intents {
 				player.execute_intent(intent);
 			}
 		}
@@ -242,21 +306,57 @@ impl Game {
 		for (_, player) in &mut self.players {
 			player.update_physics();
 		}
+	}
 
-		self.ticks.push(tick);
+	fn predict_tick(&self) -> Tick {
+		// Poll local intents and construct a command frame
+		let intents = self.poll_intents();
+		let local_frame = CommandFrame {
+			owner: self.client_id,
+			intents
+		};
+
+		// Predict player intents for the upcoming tick.
+		// A good enough heuristic is simply repeating whatever they were doing
+		// last tick.
+		let Some(previous_tick) = self.ticks.last() else {
+			return Tick::new(0, vec![local_frame]);
+		};
+
+		let mut anticipated_frames: Vec<CommandFrame> = previous_tick
+			.command_frames
+			.iter()
+			.filter(|x| x.owner != self.client_id)
+			.map(|x| x.clone())
+			.collect();
+
+		anticipated_frames.push(local_frame);
+
+		Tick::new(previous_tick.index + 1, anticipated_frames)
 	}
 }
 
+#[cfg(target_os = "windows")]
+fn main() {
+	Window::from_config(Conf {
+		window_width: SCREEN_SIZE,
+		window_height: SCREEN_SIZE,
+		window_resizable: false,
+		..Default::default()
+	}, amain(0));
+}
+
+#[cfg(not(target_os = "windows"))]
 fn main() { }
 
-async fn amain(client_id: usize) {
+async fn amain(client_id: u8) {
 	let mut tick_time = 0.0;
-	let mut tick_index = 0;
 
 	let mut game = Game {
 		client_id,
 		players: HashMap::new(),
 		ticks: Vec::new(),
+		accepted_head: 0
 	};
 
 	game.players.insert(
@@ -264,68 +364,29 @@ async fn amain(client_id: usize) {
 		Player::local()
 	);
 
-	let rect = Rect::new(
-		0.0,
-		0.0,
-		SCREEN_SIZE as f32,
-		SCREEN_SIZE as f32
-	);
-
-	let camera = Camera2D::from_display_rect(rect);
-	set_camera(&camera);
-
 	loop {
 		tick_time += get_frame_time();
 
 		while tick_time >= TICK_DELTA {
-			let local_intents = game.poll_intents();
+			let tick_to_propose: Tick = game.predict_tick();
 
-			unsafe {
-				let mut tick_data_bytes: Vec<u8> = local_intents
-					.iter()
-					.map(|x| x.to_owned().into())
-					.collect();
+			// TODO: Send the proposed tick to the server
 
-				tick_data_bytes.shrink_to_fit();
+			// Execute the proposed tick locally, anticipating that it's a correct prediction
+			game.simulate(&tick_to_propose);
 
-				send_tick_data(
-					tick_index,
-					tick_data_bytes.as_mut_ptr(),
-					tick_data_bytes.len()
-				);
-
-				std::mem::forget(tick_data_bytes);
-			}
-
-			let mut tick = Tick {
-				intents: HashMap::new()
-			};
-			tick.intents.insert(game.client_id, local_intents);
-
-			let mut net_intents = TICK_QUEUE.lock().unwrap();
-			for net_tick in net_intents.iter_mut() {
-				for (&player_id, intents) in &mut net_tick.intents {
-					if player_id == game.client_id {
-						continue;
-					}
-
-					let net_to_local_intent_binding = tick
-						.intents
-						.entry(player_id)
-						.or_insert(Vec::new());
-					net_to_local_intent_binding.append(intents);
-				}
-			}
-
-			game.simulate(tick);
+			// Add the tick to the local tick list
+			game.ticks.push(tick_to_propose);
 
 			tick_time -= TICK_DELTA;
-			tick_index += 1;
 		}
 
 		clear_background(BACKGROUND_COLOR);
 		present(&mut game, tick_time);
 		draw_text(&format!("{}", game.client_id), 15.0, 15.0, 16.0, RED);
+		if let Some(tick) = game.ticks.last() {
+			draw_text(&format!("{}", tick.index), 15.0, 45.0, 16.0, RED);
+		}
 
 		next_frame().await;
 	}
