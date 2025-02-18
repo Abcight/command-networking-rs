@@ -213,13 +213,13 @@ impl NetType for CommandFrame {
 }
 
 struct Tick {
-	index: u8,
+	index: u64,
 	command_frames: Vec<CommandFrame>,
 	hash: [u8; 32]
 }
 
 impl Tick {
-	fn new(index: u8, command_frames: Vec<CommandFrame>) -> Self {
+	fn new(index: u64, command_frames: Vec<CommandFrame>) -> Self {
 		let mut tick = Tick {
 			index,
 			command_frames,
@@ -231,7 +231,8 @@ impl Tick {
 
 	fn recalculate_hash(&mut self) {
 		let mut hasher = Sha256::new();
-		hasher.update(&[self.index, self.command_frames.len() as u8]);
+		hasher.update(self.index.to_le_bytes());
+		hasher.update(&[self.command_frames.len() as u8]);
 		for command_frame in &self.command_frames {
 			command_frame.update_hasher(&mut hasher);
 		}
@@ -241,7 +242,9 @@ impl Tick {
 
 impl NetType for Tick {
 	fn to_bytes(&self, buffer: &mut Buffer) {
-		buffer.push_back(self.index);
+		for byte in self.index.to_le_bytes() {
+			buffer.push_back(byte);
+		}
 		buffer.push_back(self.command_frames.len() as u8);
 		for command_frame in &self.command_frames {
 			command_frame.to_bytes(buffer);
@@ -249,7 +252,17 @@ impl NetType for Tick {
 	}
 
 	fn from_bytes(buffer: &mut Buffer) -> Result<Self, ()> {
-		let Some(index) = buffer.pop_front() else { return Err(()) };
+		let index: Option<u64> = {Some(u64::from_le_bytes([
+			buffer.pop_front().ok_or(())?,
+			buffer.pop_front().ok_or(())?,
+			buffer.pop_front().ok_or(())?,
+			buffer.pop_front().ok_or(())?,
+			buffer.pop_front().ok_or(())?,
+			buffer.pop_front().ok_or(())?,
+			buffer.pop_front().ok_or(())?,
+			buffer.pop_front().ok_or(())?,
+		]))};
+		let Some(index) = index else { return Err(()) };
 		let Some(len) = buffer.pop_front() else { return Err(()) };
 
 		let mut command_frames = Vec::new();
@@ -269,7 +282,7 @@ struct Game {
 	client_id: ClientId,
 	players: HashMap<ClientId, Player>,
 	ticks: Vec<Tick>,
-	accepted_head: usize,
+	accepted_head: u64,
 }
 
 impl Game {
@@ -334,6 +347,15 @@ impl Game {
 
 		Tick::new(previous_tick.index + 1, anticipated_frames)
 	}
+
+	fn print_debug(&self) {
+		draw_text(&format!("Client ID: {}", self.client_id), 10.0, 20.0, 16.0, RED);
+		if let Some(tick) = self.ticks.last() {
+			draw_text(&format!("Local tick index: {}", tick.index), 10.0, 35.0, 16.0, RED);
+			draw_text(&format!("Confirmed tick index: {}", self.accepted_head), 10.0, 50.0, 16.0, RED);
+			draw_text(&format!("Running {} ticks ahead of server", tick.index - self.accepted_head), 10.0, 65.0, 16.0, RED);
+		}
+	}
 }
 
 #[cfg(target_os = "windows")]
@@ -383,10 +405,8 @@ async fn amain(client_id: u8) {
 
 		clear_background(BACKGROUND_COLOR);
 		present(&mut game, tick_time);
-		draw_text(&format!("{}", game.client_id), 15.0, 15.0, 16.0, RED);
-		if let Some(tick) = game.ticks.last() {
-			draw_text(&format!("{}", tick.index), 15.0, 45.0, 16.0, RED);
-		}
+
+		game.print_debug();
 
 		next_frame().await;
 	}
