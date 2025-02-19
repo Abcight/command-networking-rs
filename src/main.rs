@@ -10,20 +10,20 @@ const SCREEN_SIZE: i32 = 256;
 const TICKRATE: u8 = 20;
 const TICK_DELTA: f32 = 1.0 / TICKRATE as f32;
 
-//// Here we define the host FFI; for this project, it happens to
-//// almost entirely entail just the methods necessary to communicate
-//// with the server over the net.
+//// Here we define the host FFI; because this demo is going to use a dummy
+//// network (embedded & simulated inside a JS environment), all of the
+//// communication is going to happen through mock functions.
 extern "C" {
-	fn send_command_frame(
+	fn send_predicted_tick(
 		data_ptr: *mut u8,
 		data_size: usize
 	);
 }
 
-//// Below, we define the client FFI; these are the methods that the host
-//// will use to control the client. In a real-world scenario you would
-//// likely want some authorization + encryption mechanism to ensure data
-//// is not only correct, but has been issued by an authorized server.
+//// Below, we define the client FFI; these are the methods that the JS host
+//// will use to interface with the client. In a real-world scenario you
+//// would want some authorization mechanism to ensure data has been issued
+//// by an authorized server.
 ////
 //// For the purposes of this example, this security aspect has been
 //// skipped entirely, as auth/validation flows are *not* the subject
@@ -39,52 +39,40 @@ extern "C" fn start_game(client_id: u8) {
 	}, amain(client_id));
 }
 
-#[no_mangle]
-extern "C" fn receive_tick(
-	players: *mut u8,
-	players_len: usize,
-	player_intents: *mut u8,
-	player_intents_len: usize
-) {
-
-}
-
 /// This trait defines the methods that must be implemented by all types
-/// which will be sent over the wire.
+/// which will be sent over the wire. It's just byte-format serialization.
 pub trait NetType: Sized {
 	fn to_bytes(&self, buffer: &mut Buffer);
 	fn from_bytes(buffer: &mut Buffer) -> Result<Self, ()>;
 }
 
+/// We'll use a double ended queue for serialization/deserialization, as the
+/// latter will happen by consuming the data from the front.
 pub type Buffer = VecDeque<u8>;
 
 /// Represents all actions that a player may take.
 #[derive(Clone, Copy)]
 #[repr(u8)]
 enum PlayerIntent {
-	/// The player wants to move to the left.
-	MoveLeft = 1,
-	/// The player wants to move to the right.
-	MoveRight = 2,
-	/// The player wants to jump.
-	Jump = 3,
+	/// Player wants to move to the left.
+	MoveLeft = 0,
+	/// Player wants to move to the right.
+	MoveRight = 1,
+	/// Player wants to jump.
+	Jump = 2,
 }
 
 impl NetType for PlayerIntent {
 	fn to_bytes(&self, buffer: &mut Buffer) {
-		buffer.push_back(match self {
-			PlayerIntent::MoveLeft => 1,
-			PlayerIntent::MoveRight => 2,
-			PlayerIntent::Jump => 3,
-		});
+		buffer.push_back(*self as u8);
 	}
 
 	fn from_bytes(buffer: &mut Buffer) -> Result<Self, ()> {
 		let Some(tag) = buffer.pop_front() else { return Err(()) };
 		match tag {
-			1 => Ok(PlayerIntent::MoveLeft),
-			2 => Ok(PlayerIntent::MoveRight),
-			3 => Ok(PlayerIntent::Jump),
+			0 => Ok(PlayerIntent::MoveLeft),
+			1 => Ok(PlayerIntent::MoveRight),
+			2 => Ok(PlayerIntent::Jump),
 			_ => Err(())
 		}
 	}
@@ -169,8 +157,10 @@ impl Player {
 	}
 }
 
+/// The ClientId is assigned to each player *by the server they connect to*.
 pub type ClientId = u8;
 
+/// A command frame is a collection of a player's intents, and their unique ClientId.
 #[derive(Clone)]
 struct CommandFrame {
 	owner: ClientId,
@@ -212,6 +202,8 @@ impl NetType for CommandFrame {
 	}
 }
 
+/// An ordinally indexed collection of CommandFrames, with a SHA256 checksum.
+#[derive(Clone)]
 struct Tick {
 	index: u64,
 	command_frames: Vec<CommandFrame>,
@@ -278,10 +270,15 @@ impl NetType for Tick {
 	}
 }
 
+/// A structure representing the local gamestate.
 struct Game {
+	/// ClientId denoting the local player
 	client_id: ClientId,
+	/// A map of all players and their respective ClientIds.
 	players: HashMap<ClientId, Player>,
+	/// All ticks processed by the client locally. Includes predicted ticks.
 	ticks: Vec<Tick>,
+	/// Index into ticks denoting the latest tick confirmed "correct" by the server.
 	accepted_head: u64,
 }
 
@@ -392,7 +389,17 @@ async fn amain(client_id: u8) {
 		while tick_time >= TICK_DELTA {
 			let tick_to_propose: Tick = game.predict_tick();
 
-			// TODO: Send the proposed tick to the server
+			// Send the proposed tick to the server
+			unsafe {
+				let mut tick_buffer = Buffer::new();
+				tick_to_propose.to_bytes(&mut tick_buffer);
+				tick_buffer.make_contiguous();
+
+				send_predicted_tick(
+					tick_buffer.as_mut_slices().0.as_mut_ptr(),
+					tick_buffer.len()
+				);
+			}
 
 			// Execute the proposed tick locally, anticipating that it's a correct prediction
 			game.simulate(&tick_to_propose);
