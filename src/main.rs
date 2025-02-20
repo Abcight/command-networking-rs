@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::Mutex;
 use sha2::{Sha256, Digest};
 
 use macroquad::prelude::*;
@@ -9,6 +10,12 @@ const BACKGROUND_COLOR: Color = Color::new(0.168, 0.149, 0.152, 1.0);
 const SCREEN_SIZE: i32 = 256;
 const TICKRATE: u8 = 20;
 const TICK_DELTA: f32 = 1.0 / TICKRATE as f32;
+
+/// If a game instance happens to be running in server mode, this field will
+/// be populated with all of the proposed ticks sent in by the connected clients.
+///
+/// It is the server's job to take the ticks out of this buffer and process them.
+static BUFFERED_TICKS: Mutex<Vec<Tick>> = Mutex::new(Vec::new());
 
 //// Here we define the host FFI; because this demo is going to use a dummy
 //// network (embedded & simulated inside a JS environment), all of the
@@ -37,6 +44,28 @@ extern "C" fn start_game(client_id: u8) {
 		window_resizable: false,
 		..Default::default()
 	}, amain(client_id));
+}
+
+#[no_mangle]
+unsafe extern "C" fn receive_tick(
+	data_ptr: *mut u8,
+	data_size: usize
+) {
+	let mut buffer: VecDeque<u8> = Vec::from_raw_parts(
+		data_ptr,
+		data_size,
+		data_size
+	).into();
+
+	// We expect the server to never send malformed bytes.
+	// In a real world scenario, it would be better to have a
+	// more sophisticated error handling mechanism.
+	let tick = Tick::from_bytes(&mut buffer).unwrap();
+	let mut tick_queue = BUFFERED_TICKS.lock().unwrap();
+
+	// We only add the tick to the queue, it's then processed as part of
+	// the server's update loop.
+	tick_queue.push(tick);
 }
 
 /// This trait defines the methods that must be implemented by all types
@@ -73,6 +102,71 @@ impl NetType for PlayerIntent {
 			0 => Ok(PlayerIntent::MoveLeft),
 			1 => Ok(PlayerIntent::MoveRight),
 			2 => Ok(PlayerIntent::Jump),
+			_ => Err(())
+		}
+	}
+}
+
+/// Represents the effects after acting on an intent
+enum IntentEffects {
+	/// Player moved to some x, y position.
+	MoveTo((f32, f32)),
+	/// Player velocity was set.
+	SetVerticalVelocity(f32)
+}
+
+impl IntentEffects {
+	pub const TAG_MOVE_TO: u8 = 0;
+	pub const TAG_SET_VERTICAL_VELOCITY: u8 = 1;
+	pub fn tag(&self) -> u8 {
+		match self {
+			IntentEffects::MoveTo(_) => Self::TAG_MOVE_TO,
+			IntentEffects::SetVerticalVelocity(_) => Self::TAG_SET_VERTICAL_VELOCITY,
+		}
+	}
+}
+
+impl NetType for IntentEffects {
+	fn to_bytes(&self, buffer: &mut Buffer) {
+		buffer.push_back(self.tag());
+		match self {
+			IntentEffects::MoveTo((x, y)) => {
+				buffer.extend(x.to_le_bytes());
+				buffer.extend(y.to_le_bytes());
+			},
+			IntentEffects::SetVerticalVelocity(v) => {
+				buffer.extend(v.to_le_bytes());
+			},
+		}
+	}
+
+	fn from_bytes(buffer: &mut Buffer) -> Result<Self, ()> {
+		let tag = buffer.pop_front().ok_or(())?;
+		match tag {
+			Self::TAG_MOVE_TO => {
+				let x: f32 = f32::from_le_bytes([
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+				]);
+				let y: f32 = f32::from_le_bytes([
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+				]);
+				Ok(IntentEffects::MoveTo((x, y)))
+			},
+			Self::TAG_SET_VERTICAL_VELOCITY => {
+				let v: f32 = f32::from_le_bytes([
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+					buffer.pop_front().ok_or(())?,
+				]);
+				Ok(IntentEffects::SetVerticalVelocity(v))
+			}
 			_ => Err(())
 		}
 	}
@@ -263,10 +357,13 @@ impl NetType for Tick {
 			command_frames.push(command_frame);
 		}
 
-		Ok(Tick::new(
+		let mut tick = Tick::new(
 			index,
 			command_frames
-		))
+		);
+		tick.recalculate_hash();
+
+		Ok(tick)
 	}
 }
 
